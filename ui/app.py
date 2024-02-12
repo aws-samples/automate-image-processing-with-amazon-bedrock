@@ -3,7 +3,6 @@ import boto3
 from htmlTemplates import css, bot_template, user_template
 import os
 import config
-from requests_auth_aws_sigv4 import AWSSigV4
 import requests
 import json
 from PIL import Image
