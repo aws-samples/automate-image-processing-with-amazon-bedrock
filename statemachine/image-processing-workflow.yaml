@@ -1,0 +1,178 @@
+Comment: Image processing workflow
+StartAt: Map
+States:
+  Map:
+    Type: Map
+    ItemProcessor:
+      ProcessorConfig:
+        Mode: DISTRIBUTED
+        ExecutionType: STANDARD
+      StartAt: Build Bedrock Request
+      States:
+        Build Bedrock Request:
+          Type: Task
+          Resource: arn:aws:states:::lambda:invoke
+          Parameters:
+            Payload.$: $
+            FunctionName: >-
+               ${BuildBedrockRequestFunctionArn}
+          Retry:
+            - ErrorEquals:
+                - Lambda.ServiceException
+                - Lambda.AWSLambdaException
+                - Lambda.SdkClientException
+                - Lambda.TooManyRequestsException
+              IntervalSeconds: 1
+              MaxAttempts: 3
+              BackoffRate: 2
+          ResultPath: null              
+          Next: Bedrock InvokeModel
+          Catch:
+            - ErrorEquals:
+                - States.ALL
+              Next: Update 'Failed' Status
+              ResultPath: $.Status       
+        Bedrock InvokeModel:
+          Type: Task
+          Resource: arn:aws:states:::bedrock:invokeModel
+          Parameters:
+            ModelId: >-
+              arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-image-generator-v1
+            Input:
+              S3Uri.$: >-
+                States.Format('s3://{}/{}/{}.json',
+                $.S3Bucket,$.InputS3Prefix,States.ArrayGetItem(States.StringSplit($.Image.ImageName,
+                '.'), 0))
+            Output:
+              S3Uri.$: >-
+                States.Format('s3://{}/{}/{}.json',
+                $.S3Bucket,$.OutputS3Prefix,States.ArrayGetItem(States.StringSplit($.Image.ImageName,
+                '.'), 0))
+            ContentType: application/json
+          ResultPath: $.output               
+          Next: Parse Bedrock Response
+          Catch:
+            - ErrorEquals:
+                - States.ALL
+              Next: Update 'Failed' Status
+              ResultPath: $.Status        
+        Parse Bedrock Response:
+          Type: Task
+          Resource: arn:aws:states:::lambda:invoke
+          Parameters:
+            Payload.$: $
+            FunctionName: >-
+              ${ParseBedrockResponseFunctionArn}
+          Retry:
+            - ErrorEquals:
+                - Lambda.ServiceException
+                - Lambda.AWSLambdaException
+                - Lambda.SdkClientException
+                - Lambda.TooManyRequestsException
+              IntervalSeconds: 1
+              MaxAttempts: 3
+              BackoffRate: 2
+          ResultPath: null     
+          Next: Update 'Succeeded' Status
+          Catch:
+            - ErrorEquals:
+                - States.ALL
+              Next: Update 'Failed' Status
+              ResultPath: $.Status
+        Update 'Succeeded' Status:
+          Type: Task
+          Resource: arn:aws:states:::dynamodb:putItem
+          Parameters:
+            TableName: ${StatusTableName}
+            Item:
+              Id:
+                S.$: $.Id
+              ImageName:
+                S.$: $.Image.ImageName
+              Status:
+                S: Succeeded
+          End: true
+        Update 'Failed' Status:
+          Type: Task
+          Resource: arn:aws:states:::dynamodb:putItem
+          Parameters:
+            TableName:  ${StatusTableName}
+            Item:
+              Id:
+                S.$: $.Id
+              ImageName:
+                S.$: $.Image.ImageName
+              Status:
+                S: Failed
+              Error:
+                S.$: $.Status.Error
+              Cause:
+                S.$: $.Status.Cause      
+          End: true
+    Label: Map
+    MaxConcurrency: ${MaxConcurrency}
+    ItemsPath: $.Images
+    Next: Generate Status Report
+    ItemSelector:
+      Id.$: $.Id    
+      S3Bucket.$: $.S3Bucket
+      InputS3Prefix.$: $.InputS3Prefix
+      OutputS3Prefix.$: $.OutputS3Prefix
+      Prompt.$: $.Prompt
+      NegativePrompt.$: $.NegativePrompt
+      Mode.$: $.Mode
+      Image.$: $$.Map.Item.Value
+    ToleratedFailurePercentage: 90     
+    ResultPath: null    
+  Generate Status Report:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      Payload.$: $
+      FunctionName: >-
+        ${GenerateStatusReportFunctionArn}
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+    Next: Send Email
+    ResultPath: $.StatusReport   
+    ResultSelector:
+      Url.$: $.Payload.Url    
+  Send Email:
+    Type: Task
+    Resource: arn:aws:states:::aws-sdk:sns:publish
+    Parameters:
+      TopicArn: ${NotificationSNSTopicArn}
+      Message.$: >-
+        States.Format('Hi,
+
+
+        We are pleased to inform you that the image processing has been
+        successfully completed.
+
+
+        You can access the status report at the following link: 
+        
+        s3://{}/{}/
+
+
+        All processed images can be found in the S3 bucket at the following
+        location:
+
+        s3://{}/{}/
+
+
+        Thank you.
+
+
+        Best regards,
+
+        IT Team',$.S3Bucket,$.StatusS3Prefix,$.S3Bucket,$.OutputS3Prefix)
+      Subject: Image Processing Completed - Status Report Available
+    End: true

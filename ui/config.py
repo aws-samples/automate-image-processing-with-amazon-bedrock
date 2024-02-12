@@ -1,0 +1,6 @@
+IMAGE_BUCKET = "<Image S3 Bucket>"
+IMAGE_PREFIX = "image-files"
+COGNITO_POOL_ID = "<Cognito User Pool Id>"
+COGNITO_POOL_CLIENT = "<Cognito User Pool Client>"
+COGNITO_POOL_CLIENT_SECRET = "<Cognito User Pool Client Secret>"
+API_GATEWAY_ENDPOINT = "<API Gateway Endpoint>"

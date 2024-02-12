@@ -1,0 +1,9 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "image-processing"
+resolve_s3 = true
+s3_prefix = "image-processing"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "APIName=\"api-image\" S3BucketName=\"image-processing\" ImagePrefix=\"image-files\" GeneratedImagePrefix=\"generated-image-files\" StatusReportPrefix=\"status-report-files\" StatusReportURLExpiration=\"86400\" ImageProcessingWorkflowName=\"image-processing-workflow\" NotificationSNSTopicName=\"notification-topic\" BedrockModelId=\"amazon.titan-image-generator-v1\" MaxConcurrency=\"10\""
+image_repositories = []

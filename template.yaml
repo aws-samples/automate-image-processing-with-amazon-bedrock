@@ -1,0 +1,463 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Image Outpainting 
+Parameters:
+  APIName:
+    Description: "API Gateway API Name"
+    Type: String
+    Default: 'api-image'
+
+  S3BucketName:
+    Description: "S3 bucket name"
+    Type: String
+    Default: 'image-processing'
+
+  ImagePrefix:
+    Description: "S3 prefix for image  files"
+    Type: String
+    Default: 'image-files'
+  
+  GeneratedImagePrefix:
+    Description: "S3 prefix for masked image files"
+    Type: String
+    Default: 'generated-image-files'    
+    
+  StatusReportPrefix:
+    Description: "S3 prefix for status report files"
+    Type: String
+    Default: 'status-report-files'   
+
+  StatusReportURLExpiration:
+    Description: 'Pre-signed url expiration'
+    Type: Number
+    Default: 86400      
+    
+  ImageProcessingWorkflowName:
+    Description: 'Name of the Step Function for Image Processing Workflow'
+    Type: String
+    Default: 'image-processing-workflow'    
+        
+  NotificationSNSTopicName:
+    Description: 'Notification email will be sent to this SNS topic upon image processing workflow completion'
+    Type: String
+    Default: 'notification-topic'
+    
+  NotificationEmail:
+    Description: 'Notification email will be sent to this email address upon image processing workflow completion'
+    Type: String        
+
+  BedrockModelId:
+    Description: Amazon Bedrock Model Id
+    Type: String
+    Default: 'amazon.titan-image-generator-v1'   
+    
+  MaxConcurrency:
+    Description: 'Max Concurrency for parallel processing of workflow'
+    Type: Number
+    Default: 10    
+    
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 900
+
+
+Resources:
+  ImageBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub ${S3BucketName}-bucket-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+        
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: !Ref CognitoUserPool
+      GenerateSecret: true     
+
+  APIGatewayRekognitionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+      Policies:
+        - PolicyName: APIGatewayDynamoDBPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'rekognition:DetectLabels'
+                Resource: '*'
+
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${APIName}'
+
+  AuthorizersCognitoUserPools:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref Api
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs: 
+        - !GetAtt CognitoUserPool.Arn
+        
+  RekognitionResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: detectLabels
+      
+  RekognitionMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref RekognitionResource
+      RestApiId: !Ref Api
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref AuthorizersCognitoUserPools
+      Integration:
+        Credentials: !GetAtt APIGatewayRekognitionRole.Arn
+        IntegrationHttpMethod: POST
+        IntegrationResponses: 
+          - StatusCode: 200
+        Type: AWS
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:rekognition:action/DetectLabels'
+        RequestParameters: 
+          integration.request.header.Content-Type: "'application/x-amz-json-1.1'"
+          integration.request.header.X-Amz-Target: "'RekognitionService.DetectLabels'"
+      MethodResponses:
+        - StatusCode: 200      
+          
+  RekognitionAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - "RekognitionMethod"
+    Properties:
+      Description: 'New deployment.'
+      RestApiId: !Ref Api
+      StageName: 'dev'
+
+  ImagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      TableName: ImagesTable
+      SSESpecification:
+        SSEEnabled: true    
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE     
+
+  StatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+        - AttributeName: ImageName
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+        - AttributeName: ImageName
+          KeyType: RANGE          
+      TableName: StatusTable
+      SSESpecification:
+        SSEEnabled: true    
+
+  APIGatewayDynamoDBRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+      Policies:
+        - PolicyName: APIGatewayDynamoDBPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                Resource: 
+                  - !GetAtt ImagesTable.Arn      
+
+  ImagesResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: 'images'
+      
+  ImagesMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref ImagesResource
+      RestApiId: !Ref Api
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref AuthorizersCognitoUserPools
+      Integration:
+        Credentials: !GetAtt APIGatewayDynamoDBRole.Arn
+        IntegrationHttpMethod: POST
+        IntegrationResponses: 
+          - StatusCode: 200
+        Type: AWS
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:dynamodb:action/PutItem'
+        PassthroughBehavior: WHEN_NO_TEMPLATES 
+        RequestParameters: 
+          integration.request.header.Content-Type: "'application/x-amz-json-1.1'"
+          integration.request.header.X-Amz-Target: "'DynamoDB_20120810.PutItem'"        
+        RequestTemplates: 
+          application/json: "#set($inputRoot = $input.path('$'))\n{\n  \"TableName\": \"ImagesTable\",\n  \"Item\": {\n    \"Id\": { \"S\": \"$inputRoot.Id\" },\n    \"ImageS3Prefix\": { \"S\": \"$inputRoot.ImageS3Prefix\" },\n    \"Prompt\": { \"S\": \"$inputRoot.Prompt\" },\n    \"NegativePrompt\": { \"S\": \"$inputRoot.NegativePrompt\" },\n    \"Mode\": { \"S\": \"$inputRoot.Mode\" },\n    \"Images\": {\n      \"L\": [\n        #foreach($image in $inputRoot.Images)\n        {\n          \"M\": {\n            \"ImageName\": { \"S\": \"$image.ImageName\" },\n            \"Labels\": { \"S\": \"$image.Labels\" }\n          }\n        }#if($foreach.hasNext),#end\n        #end\n      ]\n    }\n  }\n}\n"
+      MethodResponses:
+        - StatusCode: 200      
+          
+  ImagesAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - "ImagesMethod"
+    Properties:
+      Description: 'New Deployment'
+      RestApiId: !Ref Api
+      StageName: 'dev'                  
+
+  StartImageProcessingWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/start-image-processing-workflow/    
+      Handler: app.lambda_handler
+      Timeout: 120
+      MemorySize: 128
+      Environment:
+        Variables:
+          STATE_MACHINE_IMAGE_PROCESSING_ARN: !Ref ImageProcessingWorkflow
+          INPUT_BUCKET: !Sub ${S3BucketName}-bucket-${AWS::AccountId}
+          IMAGE_PREFIX: !Ref ImagePrefix
+          GENERATED_IMAGE_PREFIX: !Ref GeneratedImagePrefix       
+          STATUS_REPORT_PREFIX:  !Ref StatusReportPrefix
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt ImageProcessingWorkflow.Name
+        - DynamoDBStreamReadPolicy:
+            TableName: !Ref ImagesTable
+            StreamName: !Select [3, !Split ["/", !GetAtt ImagesTable.StreamArn]]         
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ImagesTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 1            
+
+  ImageProcessingWorkflow:
+    Type: AWS::Serverless::StateMachine 
+    Properties:
+      Name: !Ref ImageProcessingWorkflowName
+      DefinitionUri: statemachine/image-processing-workflow.yaml
+      Role: !GetAtt StatesExecutionRole.Arn
+      DefinitionSubstitutions:
+        MaxConcurrency: !Ref MaxConcurrency
+        BuildBedrockRequestFunctionArn: !GetAtt BuildBedrockRequestFunction.Arn
+        ParseBedrockResponseFunctionArn: !GetAtt ParseBedrockResponseFunction.Arn
+        GenerateStatusReportFunctionArn: !GetAtt GenerateStatusReportFunction.Arn
+        StatusTableName: !Ref StatusTable 
+        NotificationSNSTopicArn: !Ref NotificationSNSTopic
+
+  StatesExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: AllowBedrockInvokeModel       
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: "bedrock:InvokeModel"
+                  Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-image-generator-v1
+          - PolicyName: AllowInvokeFunction
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource: 
+                    - !Sub ${BuildBedrockRequestFunction.Arn}:*
+                    - !Sub ${ParseBedrockResponseFunction.Arn}:*
+                    - !Sub ${GenerateStatusReportFunction.Arn}:*
+                    - !GetAtt BuildBedrockRequestFunction.Arn
+                    - !GetAtt ParseBedrockResponseFunction.Arn
+                    - !GetAtt GenerateStatusReportFunction.Arn
+          - PolicyName: AllowStepFunctionExecution                      
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: states:StartExecution
+                  Resource: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ImageProcessingWorkflowName}
+          - PolicyName: AllowS3                      
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: 
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:AbortMultipartUpload
+                    - s3:ListMultipartUploadParts
+                  Resource: !Sub arn:aws:s3:::${S3BucketName}-bucket-${AWS::AccountId}/*            
+          - PolicyName: AllowPublishToSNSTopic
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Ref NotificationSNSTopic      
+          - PolicyName: AllowDynamoDBPutItem
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 'dynamodb:PutItem'
+                  Resource: 
+                    - !GetAtt StatusTable.Arn                      
+          - PolicyName: AllowXRay
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: 
+                    - xray:PutTraceSegments
+                    - xray:PutTelemetryRecords
+                    - xray:GetSamplingRules
+                    - xray:GetSamplingTargets
+                  Resource: "*"                     
+       
+  BuildBedrockRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/build-bedrock-request/    
+      Handler: app.lambda_handler
+      MemorySize: 512
+      EphemeralStorage:
+        Size: 1024      
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Sub ${S3BucketName}-bucket-${AWS::AccountId}
+            
+  ParseBedrockResponseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/parse-bedrock-response/    
+      Handler: app.lambda_handler
+      MemorySize: 512
+      EphemeralStorage:
+        Size: 1024      
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Sub ${S3BucketName}-bucket-${AWS::AccountId}      
+            
+  GenerateStatusReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/generate-status-report/    
+      Handler: app.lambda_handler
+      MemorySize: 128
+      Environment:
+        Variables:
+          STATUS_TABLE: !Ref StatusTable   
+          STATUS_REPORT_URL_EXPIRATION: !Ref StatusReportURLExpiration
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Sub ${S3BucketName}-bucket-${AWS::AccountId}        
+        - DynamoDBReadPolicy:
+            TableName: !Ref StatusTable                
+            
+  NotificationSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref NotificationSNSTopicName
+      Subscription: 
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail 
+
+Outputs:
+  ImageBucket:
+    Description: Image S3 Bucket
+    Value: !Ref ImageBucket
+  ImagePrefix:
+    Description: Image prefix 
+    Value: !Ref ImagePrefix
+  CognitoUserPool:
+    Description: Cognito User Pool Id
+    Value: !Ref CognitoUserPool
+  CognitoUserPoolClient:
+    Description: Cognito User Pool Client
+    Value: !Ref CognitoUserPoolClient
+  CognitoUserPoolClientSecret:
+    Description: Cognito User Pool Client Secret
+    Value: !GetAtt CognitoUserPoolClient.ClientSecret
+  ApiGatewayEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev/"  

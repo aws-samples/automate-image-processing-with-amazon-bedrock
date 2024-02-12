@@ -1,0 +1,5 @@
+boto3
+streamlit
+requests
+pillow
+streamlit-cognito-auth
