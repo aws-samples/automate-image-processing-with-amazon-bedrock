@@ -3,7 +3,7 @@
 This repository showcases an automated method for the process of changing backgrounds in multiple images. By harnessing the capabilities of generative AI with Amazon Bedrock and the Amazon Titan Image Generator G1 model, combined with Step Functions, this solution efficiently generates images with the desired background. 
 
 <p float="left">
-  <img src="images/streamlit-web-app.png width="49%" />
+  <img src="images/streamlit-web-app.png" width="49%" />
   <img src="images/streamlit-web-app-output.png" width="49%" />
 </p>
 
