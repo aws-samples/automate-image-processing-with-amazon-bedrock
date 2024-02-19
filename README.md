@@ -24,7 +24,7 @@ The solutions comprises of the below steps:
 3. Upon submission, the Streamlit web application updates [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) table with image details.
 4. The DynamoDB update triggers an [AWS Lambda function](https://aws.amazon.com/lambda/) which starts an [AWS Step Functions](https://aws.amazon.com/step-functions/) workflow.
 5. The Step Functions workflow executes the below steps for each image.
-   - Constructs a requet payload for the [Amazon Bedrock](https://aws.amazon.com/bedrock/) InvokeModel API.
+   - Constructs a request payload for the [Amazon Bedrock](https://aws.amazon.com/bedrock/) InvokeModel API.
    - Invokes Amazon Bedrock InvokeModel API action.
    - Parses image from the response and save it to an S3 location.
    - Updates status in DynamoDB table.
