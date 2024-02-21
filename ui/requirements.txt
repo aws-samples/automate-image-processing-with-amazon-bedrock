@@ -1,5 +1,5 @@
 boto3
-streamlit
+streamlit==1.30.0
 requests
 pillow
-streamlit-cognito-auth
+streamlit-cognito-auth==1.2.0
