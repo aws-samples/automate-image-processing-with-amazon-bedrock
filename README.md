@@ -2,6 +2,8 @@
 
 This repository showcases an automated method for the process of changing backgrounds in multiple images. By harnessing the capabilities of generative AI with Amazon Bedrock and the Amazon Titan Image Generator G1 model, combined with Step Functions, this solution efficiently generates images with the desired background. 
 
+See the [accompanying blog post on the AWS Machine Learning Blog](https://aws.amazon.com/blogs/machine-learning/automate-the-process-to-change-image-backgrounds-using-amazon-bedrock-and-aws-step-functions/) for a detailed description and follow the deployment instructions below to get started.
+
 <p float="left">
   <img src="images/streamlit-web-app.png" width="49%" />
   <img src="images/streamlit-web-app-output.png" width="49%" />
